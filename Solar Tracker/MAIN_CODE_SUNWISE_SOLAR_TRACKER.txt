@@ -1,0 +1,236 @@
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <TinyGPSPlus.h>
+#include <Servo.h>
+#include <math.h>
+
+// Define sensor pins and objects
+const int ldrPins[4] = {A0, A1, A2, A3};
+Adafruit_MPU6050 mpu;
+TinyGPSPlus gps;
+
+// Define servo motors
+Servo servoX;
+Servo servoY;
+
+// Solar tracking parameters (adjust as needed)
+float latitude = 42.3601;
+float longitude = -71.0589;
+int timeZoneOffset = -5;
+
+// EKF parameters for azimuth and elevation
+float azimuthEstimate = 0;
+float elevationEstimate = 0;
+float azimuthErrorEstimate = 1;
+float elevationErrorEstimate = 1;
+float azimuthQ = 0.1;   // Process noise for azimuth
+float elevationQ = 0.1; // Process noise for elevation
+float azimuthR = 1.0;   // Measurement noise for azimuth
+float elevationR = 1.0; // Measurement noise for elevation
+
+// State vector
+float stateVector[2] = {0, 0}; // [Azimuth, Elevation]
+
+// EKF covariance matrix (initialized as identity matrix)
+float covarianceMatrix[2][2] = {{1, 0}, {0, 1}};
+
+// Define sensor measurement vector (azimuth and elevation)
+float measurementVector[2] = {0, 0}; // [Azimuth, Elevation]
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+  if (!mpu.begin()) {
+    Serial.println("Failed to find MPU6050 sensor.");
+    while (1);
+  }
+  Serial.println("MPU6050 sensor found.");
+  Serial1.begin(9600); // Use Serial1 for NEO-6M
+  servoX.attach(9);  // Connect servoX to digital pin 9
+  servoY.attach(10); // Connect servoY to digital pin 10
+}
+
+void loop() {
+  // Read data from MPU6050
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  // Read data from NEO-6M GPS
+  while (Serial1.available() > 0) {
+    if (gps.encode(Serial1.read())) {
+      if (gps.location.isValid()) {
+        latitude = gps.location.lat();
+        longitude = gps.location.lng();
+        // Use GPS latitude and longitude for solar tracking
+      }
+    }
+  }
+
+  // Read LDR values
+  int ldrValues[4];
+  for (int i = 0; i < 4; i++) {
+    ldrValues[i] = analogRead(ldrPins[i]);
+  }
+
+  // Perform solar tracking calculations
+  float solarAzimuth, solarElevation;
+
+  // Apply Kalman filter for elevation
+  float measurement = solarElevation;
+  KalmanFilter(elevationEstimate, elevationErrorEstimate, measurement, elevationQ, elevationR);
+
+  controlServoMotors(solarAzimuth, elevationEstimate);
+  delay(1000); // Adjust the update rate as per your requirements
+}
+
+void controlServoMotors(float azimuth, float elevation) {
+
+  // Example servo control based on solar position
+  int servoXAngle = map(azimuth, -180, 180, 0, 180);
+  int servoYAngle = map(elevation, -90, 90, 0, 180);
+  servoX.write(servoXAngle);// set servo x position
+  servoY.write(servoYAngle);// set servo y position
+    delay(1000);
+ 
+}
+// Limit servo angles to prevent over-rotation
+  servoXAngle = constrain(servoXAngle, 0, 180);
+  servoYAngle = constrain(servoYAngle, 0, 180);
+ // Move the servo motors
+  servoX.write(servoXAngle);// set servo x position
+  servoY.write(servoYAngle);// set servo y position
+    
+}
+void calculateSolarPosition(float &azimuth, float &elevation) {
+ // Get the current date and time
+  int year = 2023;  // Replace with the actual year
+  int month = 10;   // Replace with the actual month
+  int day = 16;     // Replace with the actual day
+  int hour = 12;    // Replace with the actual hour
+  int minute = 0;  // Replace with the actual minute
+  int second = 0;  // Replace with the actual second
+
+  // Convert latitude and longitude to radians
+  float latRad = radians(latitude);
+  float lonRad = radians(longitude);
+
+  // Calculate the Julian Day
+  int N1 = floor(275 * month / 9);
+  int N2 = floor((month + 9) / 12);
+  int N3 = (1 + floor((year - 4 * floor(year / 4) + 2) / 3));
+  float JD = N1 - (N2 * N3) + day - 30;
+
+  // Calculate the time in Julian centuries since J2000.0
+  float T = (JD - 2451545.0) / 36525.0;
+
+  // Calculate solar mean longitude
+  float L0 = fmod(280.46646 + 36000.76983 * T, 360);
+
+  // Calculate mean anomaly of the sun
+  float M = fmod(357.52911 + 35999.05029 * T, 360);
+
+  // Calculate eccentricity of the Earth's orbit
+  float e = 0.016708634 - 0.000042037 * T;
+
+  // Calculate the sun's equation of center
+  float C = (1.914602 - 0.004817 * T) * sin(radians(M)) + (0.019993 - 0.000101 * T) * sin(2 * radians(M)) + 0.000289 * sin(3 * radians(M));
+
+  // Calculate the sun's true longitude
+  float L = L0 + C;
+
+  // Calculate the sun's apparent longitude
+  float theta = L - 0.00569 - 0.00478 * sin(radians(125.04 - 1934.136 * T));
+
+  // Calculate the mean obliquity of the ecliptic
+  float epsilon0 = 23.439292;
+
+  // Calculate the obliquity of the ecliptic
+  float epsilon = epsilon0 + 0.00256 * cos(radians(125.04 - 1934.136 * T));
+  // Calculate the sun's declination
+  float delta = (asin(sin(radians(epsilon)) * sin(radians(theta))));
+  delta= degrees(delta);
+
+  
+  // Calculate the solar hour angle
+  float solarNoon = 12; // Solar noon is at 12:00 PM by definition
+  float hourAngle = 15 * (hour - solarNoon);
+
+  // Calculate solar azimuth
+  azimuth = atan2(-sin(radians(hourAngle)), (cos(radians(hourAngle)) * sin(radians(latRad)) - tan(radians(delta)) * cos(radians(latRad))));
+  azimuth = fmod(azimuth + 360, 360); 
+
+
+  // Calculate solar elevation
+  elevation = asin(sin(radians(latRad)) * sin(radians(delta)) + cos(radians(latRad)) * cos(radians(delta)) * cos(radians(hourAngle)));
+  elevation = degrees(elevation);
+}
+
+}
+
+void KalmanFilter(float &estimate, float &errorEstimate, float measurement, float processNoise, float measurementNoise) {
+  // Prediction
+  float predictedEstimate = estimate;
+  float predictedErrorEstimate = errorEstimate + processNoise;
+
+  // Update
+  float kalmanGain = predictedErrorEstimate / (predictedErrorEstimate + measurementNoise);
+  estimate = predictedEstimate + kalmanGain * (measurement - predictedEstimate);
+  errorEstimate = (1 - kalmanGain) * predictedErrorEstimate;
+}
+
+
+  // Perform sensor fusion using EKF
+  calculateSolarPosition(measurementVector[0], measurementVector[1]);
+
+  // Perform EKF prediction and update steps
+  ekfPrediction();
+  ekfUpdate();
+
+  // Control servo motors based on filtered estimates
+  controlServoMotors(stateVector[0], stateVector[1]);
+
+  delay(1000); // Adjust the update rate as per your requirements
+}
+
+
+
+void controlServoMotors(float azimuth, float elevation) {
+  // Example servo control based on solar position
+  int servoXAngle = map(azimuth, -180, 180, 0, 180);
+  int servoYAngle = map(elevation, -90, 90, 0, 180);
+
+  servoX.write(servoXAngle);
+  servoY.write(servoYAngle);
+}
+
+// Extended Kalman Filter prediction step
+void ekfPrediction() {
+  // Define your prediction model here based on IMU and other data
+  // For example, you can predict how the state (azimuth and elevation) changes over time
+  // Implement the prediction model for azimuth and elevation
+
+  // Update the state vector and covariance matrix based on your prediction model
+  // You may need to compute Jacobians for your prediction model
+
+  // For now, a simple example of a zero-prediction (no change) is given
+  stateVector[0] = stateVector[0]; // No change in azimuth prediction
+  stateVector[1] = stateVector[1]; // No change in elevation prediction
+  covarianceMatrix[0][0] += azimuthQ;     // Process noise for azimuth
+  covarianceMatrix[1][1] += elevationQ;   // Process noise for elevation
+}
+
+// Extended Kalman Filter update step
+void ekfUpdate() {
+  // Define your sensor fusion model and measurement update step
+  // Implement the sensor fusion and update the state vector and covariance matrix
+
+  // For now, a simple example of measurement update (no fusion) is given
+  float kalmanGainAzimuth = covarianceMatrix[0][0] / (covarianceMatrix[0][0] + azimuthR);
+  stateVector[0] += kalmanGainAzimuth * (measurementVector[0] - stateVector[0]);
+  covarianceMatrix[0][0] *= (1 - kalmanGainAzimuth);
+
+  float kalmanGainElevation = covarianceMatrix[1][1] / (covarianceMatrix[1][1] + elevationR);
+  stateVector[1] += kalmanGainElevation * (measurementVector[1] - stateVector[1]);
+  covarianceMatrix[1][1] *= (1 - kalmanGainElevation);
+}
